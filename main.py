@@ -9,8 +9,6 @@ import sounddevice as sd
 from scipy.io.wavfile import write
 from faster_whisper import WhisperModel
 
-os.environ['KMP_DUPLICATE_LIB_OK'] = 'True'
-
 hallucinationTexts = [
     "ご視聴ありがとうございました", "ご視聴ありがとうございました。",
     "ありがとうございました", "ありがとうございました。",
