@@ -9,7 +9,7 @@ import sounddevice as sd
 from scipy.io.wavfile import write
 from faster_whisper import WhisperModel
 
-hallucinationTexts = [
+HALLUCINATION_TEXTS = [
     "ご視聴ありがとうございました", "ご視聴ありがとうございました。",
     "ありがとうございました", "ありがとうございました。",
     "どうもありがとうございました", "どうもありがとうございました。",
@@ -21,62 +21,62 @@ hallucinationTexts = [
 ]
 
 # モデルのロード
-model_size = "large-v3"
-model = WhisperModel(model_size, device="cuda", compute_type="float16")
+MODEL_SIZE = "large-v3"
+model = WhisperModel(MODEL_SIZE, device="cuda", compute_type="float16")
 
-def recordAudio(audioDirectory, fs=16000, silenceThreshold=0.3, minDuration=0.1, amplitudeThreshold=0.01, outDuration=0.5):
+def record_audio(audio_directory, fs=16000, silence_threshold=0.3, min_duration=0.1, amplitude_threshold=0.01, out_duration=0.5):
     # wavファイルの出力先を作成
-    audioDirectory.mkdir(parents=True, exist_ok=True)
+    audio_directory.mkdir(parents=True, exist_ok=True)
 
     # 録音処理
     while True:
-        fileName = f"recorded_audio_{int(time.time())}"
-        recordedAudio = []
-        silentTime = 0
-        speakTime = 0
-        speakCnt = 1
+        file_name = f"recorded_audio_{int(time.time())}"
+        recorded_audio = []
+        silent_time = 0
+        speak_time = 0
+        speak_cnt = 1
 
         try:
             with sd.InputStream(samplerate=fs, channels=1) as stream:
                 # 最初に無音状態が終わるまでは録音せずに待機
                 while True:
-                    data, overflowed = stream.read(int(fs * minDuration))
+                    data, overflowed = stream.read(int(fs * min_duration))
                     if overflowed:
                         print("Overflow occurred. Some samples might have been lost.")
-                    if np.any(np.abs(data) >= amplitudeThreshold):
-                        recordedAudio.append(data)
+                    if np.any(np.abs(data) >= amplitude_threshold):
+                        recorded_audio.append(data)
                         break
                 
                 # 録音を開始してから無音状態になるまでループ
                 while True:
-                    data, overflowed = stream.read(int(fs * minDuration))
+                    data, overflowed = stream.read(int(fs * min_duration))
                     if overflowed:
                         print("Overflow occurred. Some samples might have been lost.")
-                    recordedAudio.append(data)
-                    if np.all(np.abs(data) < amplitudeThreshold):
-                        silentTime += minDuration
-                        if silentTime >= silenceThreshold:
+                    recorded_audio.append(data)
+                    if np.all(np.abs(data) < amplitude_threshold):
+                        silent_time += min_duration
+                        if silent_time >= silence_threshold:
                             break
                     else:
                         # 一定時間経過で話し途中でもwavファイル作成
-                        speakTime += minDuration
-                        if speakTime >= outDuration:
-                            filePath = audioDirectory / f"{fileName}_{speakCnt}.wav"
-                            speakTime = 0
-                            speakCnt += 1
-                            audioData = np.concatenate(recordedAudio, axis=0)
-                            audioData = np.int16(audioData * 32767)
-                            write(filePath, fs, audioData)
-                        silentTime = 0
+                        speak_time += min_duration
+                        if speak_time >= out_duration:
+                            file_path = audio_directory / f"{file_name}_{speak_cnt}.wav"
+                            speak_time = 0
+                            speak_cnt += 1
+                            audio_data = np.concatenate(recorded_audio, axis=0)
+                            audio_data = np.int16(audio_data * 32767)
+                            write(file_path, fs, audio_data)
+                        silent_time = 0
         except Exception as e:
-            print(f"Error in recordAudio: {e}")
+            print(f"Error in record_audio: {e}")
             continue
         
         # 無音検知によるwavファイル作成
-        filePath = audioDirectory / f"{fileName}_latest.wav"
-        audioData = np.concatenate(recordedAudio, axis=0)
-        audioData = np.int16(audioData * 32767)
-        write(filePath, fs, audioData)
+        file_path = audio_directory / f"{file_name}_latest.wav"
+        audio_data = np.concatenate(recorded_audio, axis=0)
+        audio_data = np.int16(audio_data * 32767)
+        write(file_path, fs, audio_data)
 
 class FileHandler(FileSystemEventHandler):
     def on_created(self, event):
@@ -85,13 +85,13 @@ class FileHandler(FileSystemEventHandler):
         
         file_name, file_ext = os.path.splitext(event.src_path)
         if not file_name.endswith("_latest"):
-            baseName = file_name.rsplit('_', 1)[0]
+            base_name = file_name.rsplit('_', 1)[0]
             suffix = int(file_name.rsplit('_', 1)[-1])
-            if os.path.exists(os.path.join(os.path.dirname(event.src_path), f"{baseName}_latest.wav")):
+            if os.path.exists(os.path.join(os.path.dirname(event.src_path), f"{base_name}_latest.wav")):
                 # 最終ファイルがあるので処理不要、ファイル削除してスキップ
                 os.remove(event.src_path)
                 return
-            if os.path.exists(os.path.join(os.path.dirname(event.src_path), f"{baseName}_{suffix+1}.wav")):
+            if os.path.exists(os.path.join(os.path.dirname(event.src_path), f"{base_name}_{suffix + 1}.wav")):
                 # 次ファイルがあるので処理不要、ファイル削除してスキップ
                 os.remove(event.src_path)
                 return
@@ -100,44 +100,44 @@ class FileHandler(FileSystemEventHandler):
         self.process_file(event.src_path)
         os.remove(event.src_path)
 
-    def process_file(self, filePath):
+    def process_file(self, file_path):
         # 文字起こし
-        transcription = self.transcribe(filePath)
+        transcription = self.transcribe(file_path)
 
         # ハルシネーションで出力された可能性のある場合は処理しない
-        if transcription in hallucinationTexts:
+        if transcription in HALLUCINATION_TEXTS:
             return
         
         if transcription:
-            if "latest" in str(filePath):
+            if "latest" in str(file_path):
                 # 最終ファイルの場合、そのまま出力
                 print(transcription)
             else:
                 # 喋っている途中の文字起こしは《》で囲う
                 print("《"+transcription+"》")
     
-    def transcribe(self, filePath):
+    def transcribe(self, file_path):
         try:
-            with open(filePath, 'rb') as audioFile:
-                segments, _ = model.transcribe(audioFile, language="ja", beam_size=5,patience=0.5)
+            with open(file_path, 'rb') as audio_file:
+                segments, _ = model.transcribe(audio_file, language="ja", beam_size=5, patience=0.5)
                 transcription = ''.join(segment.text for segment in segments)
             return transcription
         except Exception as e:
             print(f"Error in transcribe: {e}")
             return ""
 
-def startMonitoring(watchPath):
+def start_monitoring(watch_path):
     # 録音処理(スレッドを立てる)
     # wavファイルを生成し続ける処理
-    recordThread = Thread(target=recordAudio, args=(watchPath, 16000, 0.3, 0.1, 0.01, 0.3))
-    recordThread.daemon = True
-    recordThread.start()
+    record_thread = Thread(target=record_audio, args=(watch_path, 16000, 0.3, 0.1, 0.01, 0.3))
+    record_thread.daemon = True
+    record_thread.start()
 
     # フォルダを監視してwavファイルが生成された場合
     # 文字起こし処理を行う
-    eventHandler = FileHandler()
+    event_handler = FileHandler()
     observer = Observer()
-    observer.schedule(eventHandler, watchPath, recursive=False)
+    observer.schedule(event_handler, watch_path, recursive=False)
     observer.start()
 
     try:
@@ -148,4 +148,4 @@ def startMonitoring(watchPath):
     observer.join()
 
 if __name__ == "__main__":
-    startMonitoring(Path.cwd() / "tmp")
+    start_monitoring(Path.cwd() / "tmp")
