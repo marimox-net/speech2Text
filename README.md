@@ -7,6 +7,5 @@ Whisperのlarge-3モデルを使用して、リアルタイム文字起こしを
 ```bash
 pip install numpy
 pip install watchdog
-pip install sounddevice
-pip install scipy
 pip install faster_whisper
+pip install pyaudio
