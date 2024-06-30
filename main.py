@@ -5,9 +5,10 @@ from pathlib import Path
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 from threading import Thread
-import sounddevice as sd
-from scipy.io.wavfile import write
 from faster_whisper import WhisperModel
+import wave
+import pyaudio
+import concurrent.futures
 
 HALLUCINATION_TEXTS = [
     "ご視聴ありがとうございました", "ご視聴ありがとうございました。",
@@ -24,59 +25,84 @@ HALLUCINATION_TEXTS = [
 MODEL_SIZE = "large-v3"
 model = WhisperModel(MODEL_SIZE, device="cuda", compute_type="float16")
 
-def record_audio(audio_directory, fs=16000, silence_threshold=0.3, min_duration=0.1, amplitude_threshold=0.01, out_duration=0.5):
-    # wavファイルの出力先を作成
+# パラメータ設定
+FORMAT = pyaudio.paInt16
+CHANNELS = 1
+RATE = 44100
+CHUNK = 1024
+SILENCE_THRESHOLD = 10  # 無音判定のしきい値
+SILENCE_DURATION = 0.2  # 無音判定する持続時間 (秒)
+OUT_DURATION = 0.5 # 強制的に途中出力する時間(秒)
+MIN_AUDIO_LENGTH = 0.1  # 最小音声長 (秒)
+
+# PyAudioインスタンス作成
+audio = pyaudio.PyAudio()
+
+# ストリームの設定
+stream = audio.open(format=FORMAT,
+                    channels=CHANNELS,
+                    rate=RATE,
+                    input=True,
+                    frames_per_buffer=CHUNK)
+
+executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+
+def record_audio(audio_directory):
+    frames = []
+    recording = False
+    silent_chunks = 0
+    speak_chunks = 0
+    speak_cnt = 1
+
     audio_directory.mkdir(parents=True, exist_ok=True)
 
-    # 録音処理
-    while True:
-        file_name = f"recorded_audio_{int(time.time())}"
-        recorded_audio = []
-        silent_time = 0
-        speak_time = 0
-        speak_cnt = 1
+    def is_silent(data):
+        # 無音かどうかを判定する関数
+        rms = np.sqrt(np.mean(np.square(np.frombuffer(data, dtype=np.int16))))
+        return rms < SILENCE_THRESHOLD
 
-        try:
-            with sd.InputStream(samplerate=fs, channels=1) as stream:
-                # 最初に無音状態が終わるまでは録音せずに待機
-                while True:
-                    data, overflowed = stream.read(int(fs * min_duration))
-                    if overflowed:
-                        print("Overflow occurred. Some samples might have been lost.")
-                    if np.any(np.abs(data) >= amplitude_threshold):
-                        recorded_audio.append(data)
-                        break
-                
-                # 録音を開始してから無音状態になるまでループ
-                while True:
-                    data, overflowed = stream.read(int(fs * min_duration))
-                    if overflowed:
-                        print("Overflow occurred. Some samples might have been lost.")
-                    recorded_audio.append(data)
-                    if np.all(np.abs(data) < amplitude_threshold):
-                        silent_time += min_duration
-                        if silent_time >= silence_threshold:
-                            break
-                    else:
-                        # 一定時間経過で話し途中でもwavファイル作成
-                        speak_time += min_duration
-                        if speak_time >= out_duration:
-                            file_path = audio_directory / f"{file_name}_{speak_cnt}.wav"
-                            speak_time = 0
-                            speak_cnt += 1
-                            audio_data = np.concatenate(recorded_audio, axis=0)
-                            audio_data = np.int16(audio_data * 32767)
-                            write(file_path, fs, audio_data)
-                        silent_time = 0
-        except Exception as e:
-            print(f"Error in record_audio: {e}")
-            continue
-        
-        # 無音検知によるwavファイル作成
-        file_path = audio_directory / f"{file_name}_latest.wav"
-        audio_data = np.concatenate(recorded_audio, axis=0)
-        audio_data = np.int16(audio_data * 32767)
-        write(file_path, fs, audio_data)
+    def save_wave_file(filename, frames):
+        # 録音データをWAVファイルとして保存する関数
+        with wave.open(str(filename), 'wb') as wf:  # Pathオブジェクトを文字列に変換
+            wf.setnchannels(CHANNELS)
+            wf.setsampwidth(audio.get_sample_size(FORMAT))
+            wf.setframerate(RATE)
+            wf.writeframes(b''.join(frames))
+
+    while True:
+        data = stream.read(CHUNK)
+        silent = is_silent(data)
+
+        if silent:
+            silent_chunks += 1
+            speak_chunks = 0
+        else:
+            silent_chunks = 0
+            speak_chunks += 1
+
+        if silent_chunks > (SILENCE_DURATION * RATE / CHUNK):
+            if recording:
+                if len(frames) * CHUNK / RATE < MIN_AUDIO_LENGTH:
+                    return
+                else:
+                    # 無音状態が続いたら録音を停止してファイルを保存
+                    file_path = audio_directory / f"recorded_audio_{file_name}_latest.wav"
+                    executor.submit(save_wave_file, Path(file_path), frames)
+                frames = []
+                recording = False
+                speak_cnt = 1
+        else:
+            if not recording:
+                file_name = f"{int(time.time())}"
+                recording = True
+
+            if speak_chunks > (OUT_DURATION * RATE / CHUNK):
+                file_path = audio_directory / f"recorded_audio_{file_name}_{speak_cnt}.wav"
+                executor.submit(save_wave_file, Path(file_path), frames)
+                speak_cnt += 1
+                speak_chunks = 0
+
+            frames.append(data)
 
 class FileHandler(FileSystemEventHandler):
     def on_created(self, event):
@@ -129,7 +155,7 @@ class FileHandler(FileSystemEventHandler):
 def start_monitoring(watch_path):
     # 録音処理(スレッドを立てる)
     # wavファイルを生成し続ける処理
-    record_thread = Thread(target=record_audio, args=(watch_path, 16000, 0.3, 0.1, 0.01, 0.3))
+    record_thread = Thread(target=record_audio, args=(watch_path,))
     record_thread.daemon = True
     record_thread.start()
 
